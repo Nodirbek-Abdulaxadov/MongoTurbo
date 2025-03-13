@@ -1,43 +1,50 @@
-use std::env;
+use dashmap::DashMap;
 use std::sync::Arc;
-use warp::{Filter, Reply, Rejection, reject};
-use mongodb::{Client, bson::{doc, Bson, Document}};
+use std::time::{Duration, Instant};
 use serde::Deserialize;
+use warp::{Filter, Reply, Rejection};
 
 #[derive(Clone)]
-struct CacheDB {
-    client: Client,
+struct AppState {
+    // Use DashMap for concurrent, lock-free (optimistic) in-memory caching.
+    memory: Arc<DashMap<String, CacheEntry>>,
+}
+
+#[derive(Clone, Debug)]
+struct CacheEntry {
+    value: String,
+    expires_at: Option<Instant>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SetRequest {
     key: String,
     value: String,
-    ttl: Option<u64>,
+    ttl: Option<u64>, // TTL in seconds
 }
 
-// Custom error type for Warp rejection
-#[derive(Debug)]
-struct DatabaseError;
-impl reject::Reject for DatabaseError {}
+#[derive(Debug, Deserialize)]
+struct GetQuery {
+    key: String,
+}
 
 #[tokio::main]
 async fn main() {
-    let mongo_uri = env::var("MONGO_URI").unwrap_or_else(|_| "mongodb://localhost:27017".to_string());
-    let client = Client::with_uri_str(&mongo_uri)
-        .await
-        .expect("Failed to connect to MongoDB");
-    
-    let db = Arc::new(CacheDB { client });
+    // Create shared state using DashMap.
+    let state = Arc::new(AppState {
+        memory: Arc::new(DashMap::new()),
+    });
 
+    // Define the set route.
     let set_route = warp::path("set")
         .and(warp::body::json())
-        .and(with_db(db.clone()))
+        .and(with_state(state.clone()))
         .and_then(set_handler);
 
+    // Define the get route.
     let get_route = warp::path("get")
         .and(warp::query::<GetQuery>())
-        .and(with_db(db.clone()))
+        .and(with_state(state.clone()))
         .and_then(get_handler);
 
     let routes = set_route.or(get_route);
@@ -46,38 +53,39 @@ async fn main() {
     warp::serve(routes).run(([127, 0, 0, 1], 6060)).await;
 }
 
-#[derive(Debug, Deserialize)]
-struct GetQuery {
-    key: String,
+// Helper filter to inject shared application state.
+fn with_state(state: Arc<AppState>) -> impl Filter<Extract = (Arc<AppState>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || state.clone())
 }
 
-fn with_db(db: Arc<CacheDB>) -> impl Filter<Extract = (Arc<CacheDB>,), Error = std::convert::Infallible> + Clone {
-    warp::any().map(move || db.clone())
+// The "set" handler updates the in-memory cache immediately.
+async fn set_handler(req: SetRequest, state: Arc<AppState>) -> Result<impl Reply, Rejection> {
+    // Calculate expiration if a TTL is provided.
+    let expires_at = req.ttl.map(|ttl| Instant::now() + Duration::from_secs(ttl));
+    
+    // Insert/update the in-memory cache.
+    state.memory.insert(req.key.clone(), CacheEntry { 
+        value: req.value, 
+        expires_at 
+    });
+    
+    Ok(warp::reply::json(&serde_json::json!({"status": "success"})))
 }
 
-async fn set_handler(req: SetRequest, db: Arc<CacheDB>) -> Result<impl Reply, Rejection> {
-    let collection: mongodb::Collection<Document> = db.client.database("cache").collection("data");
-
-    let document = doc! {
-        "key": &req.key,
-        "value": &req.value,
-        "expires_at": req.ttl.map(|ttl| Bson::Int64(ttl as i64)).unwrap_or(Bson::Null),
-    };
-
-    match collection.insert_one(document, None).await {
-        Ok(_) => Ok(warp::reply::json(&doc! {"status": "success"})),
-        Err(_) => Err(reject::custom(DatabaseError)),  // Fixed rejection type
+// The "get" handler reads from the in-memory cache and checks for expiration.
+async fn get_handler(query: GetQuery, state: Arc<AppState>) -> Result<impl Reply, Rejection> {
+    let now = Instant::now();
+    if let Some(entry) = state.memory.get(&query.key) {
+        if let Some(exp) = entry.expires_at {
+            if now > exp {
+                state.memory.remove(&query.key);
+                return Ok(warp::reply::json(&serde_json::json!({"error": "Key not found"})));
+            }
+        }
+        return Ok(warp::reply::json(&serde_json::json!({
+            "key": query.key,
+            "value": entry.value.clone()
+        })));
     }
-}
-
-async fn get_handler(query: GetQuery, db: Arc<CacheDB>) -> Result<impl Reply, Rejection> {
-    let key = query.key;  // Extract the key from the query struct
-
-    let collection: mongodb::Collection<Document> = db.client.database("cache").collection("data");
-
-    match collection.find_one(doc! {"key": &key}, None).await {
-        Ok(Some(doc)) => Ok(warp::reply::json(&doc)),
-        Ok(None) => Ok(warp::reply::json(&doc! {"error": "Key not found"})),
-        Err(_) => Err(reject::custom(DatabaseError)),
-    }
+    Ok(warp::reply::json(&serde_json::json!({"error": "Key not found"})))
 }
