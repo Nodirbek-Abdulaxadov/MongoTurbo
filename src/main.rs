@@ -12,7 +12,7 @@ struct AppState {
 
 #[derive(Clone, Debug)]
 struct CacheEntry {
-    value: String,
+    value: Arc<String>, // Use Arc<String> to reduce allocations
     expires_at: Option<Instant>,
 }
 
@@ -59,22 +59,56 @@ fn with_state(state: Arc<AppState>) -> impl Filter<Extract = (Arc<AppState>,), E
 }
 
 // The "set" handler updates the in-memory cache immediately.
+// async fn set_handler(req: SetRequest, state: Arc<AppState>) -> Result<impl Reply, Rejection> {
+//     // Calculate expiration if a TTL is provided.
+//     let expires_at = req.ttl.map(|ttl| Instant::now() + Duration::from_secs(ttl));
+    
+//     // Insert/update the in-memory cache.
+//     state.memory.insert(req.key.clone(), CacheEntry { 
+//         value: req.value, 
+//         expires_at 
+//     });
+    
+//     Ok(warp::reply::json(&serde_json::json!({"status": "success"})))
+// }
+
+// The "set" handler updates the in-memory cache with lowest possible latency.
 async fn set_handler(req: SetRequest, state: Arc<AppState>) -> Result<impl Reply, Rejection> {
-    // Calculate expiration if a TTL is provided.
+    let value_arc = Arc::new(req.value);  // Convert String to Arc<String>
+
     let expires_at = req.ttl.map(|ttl| Instant::now() + Duration::from_secs(ttl));
-    
-    // Insert/update the in-memory cache.
-    state.memory.insert(req.key.clone(), CacheEntry { 
-        value: req.value, 
-        expires_at 
+
+    state.memory.insert(req.key, CacheEntry {
+        value: value_arc,  // Correct type: Arc<String>
+        expires_at,
     });
-    
+
     Ok(warp::reply::json(&serde_json::json!({"status": "success"})))
 }
 
+
+
 // The "get" handler reads from the in-memory cache and checks for expiration.
+// async fn get_handler(query: GetQuery, state: Arc<AppState>) -> Result<impl Reply, Rejection> {
+//     let now = Instant::now();
+//     if let Some(entry) = state.memory.get(&query.key) {
+//         if let Some(exp) = entry.expires_at {
+//             if now > exp {
+//                 state.memory.remove(&query.key);
+//                 return Ok(warp::reply::json(&serde_json::json!({"error": "Key not found"})));
+//             }
+//         }
+//         return Ok(warp::reply::json(&serde_json::json!({
+//             "key": query.key,
+//             "value": entry.value.clone()
+//         })));
+//     }
+//     Ok(warp::reply::json(&serde_json::json!({"error": "Key not found"})))
+// }
+
 async fn get_handler(query: GetQuery, state: Arc<AppState>) -> Result<impl Reply, Rejection> {
     let now = Instant::now();
+
     if let Some(entry) = state.memory.get(&query.key) {
         if let Some(exp) = entry.expires_at {
             if now > exp {
@@ -84,8 +118,9 @@ async fn get_handler(query: GetQuery, state: Arc<AppState>) -> Result<impl Reply
         }
         return Ok(warp::reply::json(&serde_json::json!({
             "key": query.key,
-            "value": entry.value.clone()
+            "value": entry.value.as_ref().clone()  // FIXED: Clone the `String` inside `Arc`
         })));
     }
+
     Ok(warp::reply::json(&serde_json::json!({"error": "Key not found"})))
 }
