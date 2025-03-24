@@ -1,20 +1,25 @@
-# Use Rust official image
-FROM rust:latest
+# Use the official Rust image
+FROM rust:1.75-slim
 
-# Set working directory inside the container
+# Install required build tools and Clang (for bindgen)
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    clang \
+    libclang-dev \
+    cmake \
+    pkg-config \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
 WORKDIR /app
 
-# Copy Cargo files first (for caching dependencies)
-COPY Cargo.toml Cargo.lock ./
+# Copy project files
+COPY . .
 
-# Create empty src directory to avoid build errors
-RUN mkdir -p src 
-
-# Copy the source code after dependencies are cached
-COPY src/ src/
-
-# Build the application in release mode
+# Build in release mode
 RUN cargo build --release
 
-# Set the binary as the entry point
-CMD ["./target/release/MongoTurbo"]
+# Run server by default
+CMD ["./target/release/rust-distributed-cache"]

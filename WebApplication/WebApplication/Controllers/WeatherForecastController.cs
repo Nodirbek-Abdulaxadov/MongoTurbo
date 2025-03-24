@@ -8,7 +8,7 @@ namespace WebApp.Controllers;
 [ApiController]
 [Route("[controller]")]
 public class WeatherForecastController(RedisService redisService, 
-                                       MongoTurboService mongoTurboService) 
+                                       RustCacheClient rustCacheService) 
     : ControllerBase
 {
     private static readonly string[] Summaries =
@@ -36,12 +36,12 @@ public class WeatherForecastController(RedisService redisService,
         stopwatch.Stop();
 
         Stopwatch stopwatch1 = Stopwatch.StartNew();
-        await mongoTurboService.SetAsync("weathers", items);
+        await rustCacheService.SetAsync("weathers", items);
         stopwatch1.Stop();
 
         var result = $"""
         Redis set time:         {stopwatch.Elapsed.TotalMilliseconds} ms
-        MongoTurbo set time:    {stopwatch1.Elapsed.TotalMilliseconds} ms
+        RustCache set time:    {stopwatch1.Elapsed.TotalMilliseconds} ms
         """;
 
         return Ok(result);
@@ -55,12 +55,12 @@ public class WeatherForecastController(RedisService redisService,
         stopwatch.Stop();
 
         Stopwatch stopwatch1 = Stopwatch.StartNew();
-        var items2 = await mongoTurboService.GetAsync("weathers");
+        var items2 = await rustCacheService.GetAsync("weathers");
         stopwatch1.Stop();
 
         var result = $"""
         Redis get time:         {stopwatch.Elapsed.TotalMilliseconds} ms
-        MongoTurbo get time:    {stopwatch1.Elapsed.TotalMilliseconds} ms
+        RustCache get time:    {stopwatch1.Elapsed.TotalMilliseconds} ms
         """;
 
         return Ok(result);

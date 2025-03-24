@@ -19,7 +19,7 @@ builder.Services.AddStackExchangeRedisCache(options =>
 });
 
 builder.Services.AddSingleton<RedisService>();
-builder.Services.AddSingleton<MongoTurboService>();
+builder.Services.AddSingleton<RustCacheClient>();
 
 var app = builder.Build();
 

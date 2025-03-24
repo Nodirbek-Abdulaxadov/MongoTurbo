@@ -1,126 +1,99 @@
+use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use rocksdb::{DB, Options};
 use dashmap::DashMap;
+use bytes::BytesMut;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use serde::Deserialize;
-use warp::{Filter, Reply, Rejection};
 
-#[derive(Clone)]
-struct AppState {
-    // Use DashMap for concurrent, lock-free (optimistic) in-memory caching.
-    memory: Arc<DashMap<String, CacheEntry>>,
+struct Cache {
+    memory: Arc<DashMap<String, String>>,
+    db: Option<Arc<DB>>,
 }
 
-#[derive(Clone, Debug)]
-struct CacheEntry {
-    value: Arc<String>, // Use Arc<String> to reduce allocations
-    expires_at: Option<Instant>,
+impl Cache {
+    fn new(use_rocksdb: bool) -> Self {
+        let db = if use_rocksdb {
+            let mut opts = Options::default();
+            opts.create_if_missing(true);
+            Some(Arc::new(DB::open(&opts, "rocksdb-data").unwrap()))
+        } else {
+            None
+        };
+
+        Cache {
+            memory: Arc::new(DashMap::new()),
+            db,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<String> {
+        self.memory.get(key).map(|v| v.to_string()).or_else(|| {
+            self.db.as_ref()
+                .and_then(|db| db.get(key).ok().flatten())
+                .and_then(|v| String::from_utf8(v).ok())
+        })
+    }
+
+    fn set(&self, key: &str, value: &str) {
+        self.memory.insert(key.to_string(), value.to_string());
+        if let Some(db) = &self.db {
+            let _ = db.put(key, value);
+        }
+    }
 }
 
-#[derive(Debug, Deserialize)]
-struct SetRequest {
-    key: String,
-    value: String,
-    ttl: Option<u64>, // TTL in seconds
-}
+async fn handle_client(mut stream: TcpStream, cache: Arc<Cache>) {
+    let mut buf = BytesMut::with_capacity(1024);
 
-#[derive(Debug, Deserialize)]
-struct GetQuery {
-    key: String,
+    loop {
+        buf.clear();
+        let n = match stream.read_buf(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+
+        let request = match std::str::from_utf8(&buf[..n]) {
+            Ok(s) => s.trim(),
+            Err(_) => {
+                let _ = stream.write_all(b"ERROR: Invalid UTF-8\n").await;
+                continue;
+            }
+        };
+
+        let mut parts = request.split_whitespace();
+        let cmd = parts.next();
+        let key = parts.next();
+        let val = parts.next();
+
+        let response = match (cmd, key, val) {
+            (Some("GET"), Some(k), None) => cache.get(k).unwrap_or_else(|| "Key not found".into()),
+            (Some("SET"), Some(k), Some(v)) => {
+                cache.set(k, v);
+                "OK".into()
+            }
+            _ => "ERROR: Invalid command".into(),
+        };
+
+        if stream.write_all(response.as_bytes()).await.is_err() {
+            break;
+        }
+        let _ = stream.flush().await;
+    }
 }
 
 #[tokio::main]
 async fn main() {
-    // Create shared state using DashMap.
-    let state = Arc::new(AppState {
-        memory: Arc::new(DashMap::new()),
-    });
+    let use_rocksdb = std::env::var("USE_ROCKSDB").unwrap_or_default().to_lowercase() == "true";
+    let cache = Arc::new(Cache::new(use_rocksdb));
+    let listener = TcpListener::bind("0.0.0.0:6060").await.unwrap();
 
-    // Define the set route.
-    let set_route = warp::path("set")
-        .and(warp::body::json())
-        .and(with_state(state.clone()))
-        .and_then(set_handler);
-
-    // Define the get route.
-    let get_route = warp::path("get")
-        .and(warp::query::<GetQuery>())
-        .and(with_state(state.clone()))
-        .and_then(get_handler);
-
-    let routes = set_route.or(get_route);
-
-    println!("Server running on http://localhost:6060");
-    warp::serve(routes).run(([127, 0, 0, 1], 6060)).await;
-}
-
-// Helper filter to inject shared application state.
-fn with_state(state: Arc<AppState>) -> impl Filter<Extract = (Arc<AppState>,), Error = std::convert::Infallible> + Clone {
-    warp::any().map(move || state.clone())
-}
-
-// The "set" handler updates the in-memory cache immediately.
-// async fn set_handler(req: SetRequest, state: Arc<AppState>) -> Result<impl Reply, Rejection> {
-//     // Calculate expiration if a TTL is provided.
-//     let expires_at = req.ttl.map(|ttl| Instant::now() + Duration::from_secs(ttl));
-    
-//     // Insert/update the in-memory cache.
-//     state.memory.insert(req.key.clone(), CacheEntry { 
-//         value: req.value, 
-//         expires_at 
-//     });
-    
-//     Ok(warp::reply::json(&serde_json::json!({"status": "success"})))
-// }
-
-// The "set" handler updates the in-memory cache with lowest possible latency.
-async fn set_handler(req: SetRequest, state: Arc<AppState>) -> Result<impl Reply, Rejection> {
-    let value_arc = Arc::new(req.value);  // Convert String to Arc<String>
-
-    let expires_at = req.ttl.map(|ttl| Instant::now() + Duration::from_secs(ttl));
-
-    state.memory.insert(req.key, CacheEntry {
-        value: value_arc,  // Correct type: Arc<String>
-        expires_at,
-    });
-
-    Ok(warp::reply::json(&serde_json::json!({"status": "success"})))
-}
-
-
-
-// The "get" handler reads from the in-memory cache and checks for expiration.
-// async fn get_handler(query: GetQuery, state: Arc<AppState>) -> Result<impl Reply, Rejection> {
-//     let now = Instant::now();
-//     if let Some(entry) = state.memory.get(&query.key) {
-//         if let Some(exp) = entry.expires_at {
-//             if now > exp {
-//                 state.memory.remove(&query.key);
-//                 return Ok(warp::reply::json(&serde_json::json!({"error": "Key not found"})));
-//             }
-//         }
-//         return Ok(warp::reply::json(&serde_json::json!({
-//             "key": query.key,
-//             "value": entry.value.clone()
-//         })));
-//     }
-//     Ok(warp::reply::json(&serde_json::json!({"error": "Key not found"})))
-// }
-
-async fn get_handler(query: GetQuery, state: Arc<AppState>) -> Result<impl Reply, Rejection> {
-    let now = Instant::now();
-
-    if let Some(entry) = state.memory.get(&query.key) {
-        if let Some(exp) = entry.expires_at {
-            if now > exp {
-                state.memory.remove(&query.key);
-                return Ok(warp::reply::json(&serde_json::json!({"error": "Key not found"})));
-            }
+    loop {
+        if let Ok((stream, _)) = listener.accept().await {
+            let cache = cache.clone();
+            tokio::spawn(async move {
+                handle_client(stream, cache).await;
+            });
         }
-        return Ok(warp::reply::json(&serde_json::json!({
-            "key": query.key,
-            "value": entry.value.as_ref().clone()  // FIXED: Clone the `String` inside `Arc`
-        })));
     }
-
-    Ok(warp::reply::json(&serde_json::json!({"error": "Key not found"})))
 }

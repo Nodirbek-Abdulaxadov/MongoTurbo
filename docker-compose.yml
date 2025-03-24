@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  rust-cache:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rust-cache-server
+    ports:
+      - "6060:6060"
+    volumes:
+      - ./rocksdb-data:/app/rocksdb-data
+    environment:
+      - USE_ROCKSDB=true
+    restart: unless-stopped

@@ -8,7 +8,7 @@ namespace WebApp.Controllers;
 [ApiController]
 [Route("[controller]")]
 public class HighLoadTestController(RedisService redisService,
-                                       MongoTurboService mongoTurboService)
+                                    RustCacheClient rustCacheService)
     : ControllerBase
 {
     // This endpoint tests the "set" operations under high load.
@@ -30,11 +30,11 @@ public class HighLoadTestController(RedisService redisService,
             redisTimes.Add(sw.Elapsed.TotalMilliseconds);
         }
 
-        // Test MongoTurbo set operations
+        // Test RustCache set operations
         for (int i = 0; i < iterations; i++)
         {
             Stopwatch sw = Stopwatch.StartNew();
-            await mongoTurboService.SetAsync("weathers", items);
+            await rustCacheService.SetAsync("weathers", items);
             sw.Stop();
             mongoTimes.Add(sw.Elapsed.TotalMilliseconds);
         }
@@ -47,7 +47,7 @@ public class HighLoadTestController(RedisService redisService,
                 Max = redisTimes.Max(),
                 Average = redisTimes.Average()
             },
-            MongoTurboSet = new
+            RustCacheSet = new
             {
                 Min = mongoTimes.Min(),
                 Max = mongoTimes.Max(),
@@ -75,11 +75,11 @@ public class HighLoadTestController(RedisService redisService,
             redisTimes.Add(sw.Elapsed.TotalMilliseconds);
         }
 
-        // Test MongoTurbo get operations
+        // Test RustCache get operations
         for (int i = 0; i < iterations; i++)
         {
             Stopwatch sw = Stopwatch.StartNew();
-            await mongoTurboService.GetAsync("weathers");
+            await rustCacheService.GetAsync("weathers");
             sw.Stop();
             mongoTimes.Add(sw.Elapsed.TotalMilliseconds);
         }
@@ -92,7 +92,7 @@ public class HighLoadTestController(RedisService redisService,
                 Max = redisTimes.Max(),
                 Average = redisTimes.Average()
             },
-            MongoTurboGet = new
+            RustCacheGet = new
             {
                 Min = mongoTimes.Min(),
                 Max = mongoTimes.Max(),
@@ -108,7 +108,7 @@ public class HighLoadTestController(RedisService redisService,
     public async Task<IActionResult> SetHighloadParallelTest()
     {
         var items = Newtonsoft.Json.JsonConvert.SerializeObject(Get());
-        int iterations = 10_000;
+        int iterations = 1_000;
 
         // Parallel test for Redis
         var redisTasks = new List<Task<double>>();
@@ -117,11 +117,11 @@ public class HighLoadTestController(RedisService redisService,
             redisTasks.Add(MeasureExecutionTimeAsync(() => redisService.SetAsync("weathers", items)));
         }
 
-        // Parallel test for MongoTurbo
+        // Parallel test for RustCache
         var mongoTasks = new List<Task<double>>();
         for (int i = 0; i < iterations; i++)
         {
-            mongoTasks.Add(MeasureExecutionTimeAsync(() => mongoTurboService.SetAsync("weathers", items)));
+            mongoTasks.Add(MeasureExecutionTimeAsync(() => rustCacheService.SetAsync("weathers", items)));
         }
 
         // Run both tests concurrently
@@ -138,7 +138,7 @@ public class HighLoadTestController(RedisService redisService,
                 Max = redisTimes.Max(),
                 Average = redisTimes.Average()
             },
-            MongoTurboSet = new
+            RustCacheSet = new
             {
                 Min = mongoTimes.Min(),
                 Max = mongoTimes.Max(),
@@ -153,7 +153,7 @@ public class HighLoadTestController(RedisService redisService,
     [HttpGet("get-highload-parallel")]
     public async Task<IActionResult> GetHighloadParallelTest()
     {
-        int iterations = 10_000;
+        int iterations = 1_000;
 
         // Parallel test for Redis
         var redisTasks = new List<Task<double>>();
@@ -162,11 +162,11 @@ public class HighLoadTestController(RedisService redisService,
             redisTasks.Add(MeasureExecutionTimeAsync(() => redisService.GetAsync("weathers")));
         }
 
-        // Parallel test for MongoTurbo
+        // Parallel test for RustCache
         var mongoTasks = new List<Task<double>>();
         for (int i = 0; i < iterations; i++)
         {
-            mongoTasks.Add(MeasureExecutionTimeAsync(() => mongoTurboService.GetAsync("weathers")));
+            mongoTasks.Add(MeasureExecutionTimeAsync(() => rustCacheService.GetAsync("weathers")));
         }
 
         // Run both tests concurrently
@@ -183,7 +183,7 @@ public class HighLoadTestController(RedisService redisService,
                 Max = redisTimes.Max(),
                 Average = redisTimes.Average()
             },
-            MongoTurboSet = new
+            RustCacheSet = new
             {
                 Min = mongoTimes.Min(),
                 Max = mongoTimes.Max(),
